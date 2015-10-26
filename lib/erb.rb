@@ -12,7 +12,6 @@
 # You can redistribute it and/or modify it under the same terms as Ruby.
 
 require "cgi/util"
-
 #
 # = ERB -- Ruby Templating
 #
@@ -48,6 +47,7 @@ require "cgi/util"
 #   % a line of Ruby code -- treated as <% line %> (optional -- see ERB.new)
 #   %% replaced with % if first thing on a line and % processing is used
 #   <%% or %%> -- replace with <% or %> respectively
+#   <!#-- ERB comment. Ignores all enclosed HTML and embedded Ruby and removes from output --#>
 #
 # All other text is passed through ERB filtering unchanged.
 #
@@ -419,7 +419,7 @@ class ERB
       end
 
       def scan_line(line)
-        line.scan(/(.*?)(<%%|%%>|<%=|<%#|<%|%>|\n|\z)/m) do |tokens|
+        line.scan(/(.*?)(<!#--|--#>|<%%|%%>|<%=|<%#|<%|%>|\n|\z)/m) do |tokens|
           tokens.each do |token|
             next if token.empty?
             yield(token)
@@ -428,7 +428,7 @@ class ERB
       end
 
       def trim_line1(line)
-        line.scan(/(.*?)(<%%|%%>|<%=|<%#|<%|%>\n|%>|\n|\z)/m) do |tokens|
+        line.scan(/(.*?)(<!#--|--#>|<%%|%%>|<%=|<%#|<%|%>\n|%>|\n|\z)/m) do |tokens|
           tokens.each do |token|
             next if token.empty?
             if token == "%>\n"
@@ -443,7 +443,7 @@ class ERB
 
       def trim_line2(line)
         head = nil
-        line.scan(/(.*?)(<%%|%%>|<%=|<%#|<%|%>\n|%>|\n|\z)/m) do |tokens|
+        line.scan(/(.*?)(<!#--|--#>|<%%|%%>|<%=|<%#|<%|%>\n|%>|\n|\z)/m) do |tokens|
           tokens.each do |token|
             next if token.empty?
             head = token unless head
@@ -464,7 +464,7 @@ class ERB
       end
 
       def explicit_trim_line(line)
-        line.scan(/(.*?)(^[ \t]*<%\-|<%\-|<%%|%%>|<%=|<%#|<%|-%>\n|-%>|%>|\z)/m) do |tokens|
+        line.scan(/(.*?)(^[ \t]*<%\-|<%\-|<!#--|--#>|<%%|%%>|<%=|<%#|<%|-%>\n|-%>|%>|\z)/m) do |tokens|
           tokens.each do |token|
             next if token.empty?
             if @stag.nil? && /[ \t]*<%-/ =~ token
@@ -491,7 +491,7 @@ class ERB
 
     class SimpleScanner < Scanner # :nodoc:
       def scan
-        @src.scan(/(.*?)(<%%|%%>|<%=|<%#|<%|%>|\n|\z)/m) do |tokens|
+        @src.scan(/(.*?)(<!#--|--#>|<%%|%%>|<%=|<%#|<%|%>|\n|\z)/m) do |tokens|
           tokens.each do |token|
             next if token.empty?
             yield(token)
@@ -499,15 +499,14 @@ class ERB
         end
       end
     end
-
     Scanner.regist_scanner(SimpleScanner, nil, false)
 
     begin
       require 'strscan'
       class SimpleScanner2 < Scanner # :nodoc:
         def scan
-          stag_reg = /(.*?)(<%%|<%=|<%#|<%|\z)/m
-          etag_reg = /(.*?)(%%>|%>|\z)/m
+          stag_reg = /(.*?)(<!#--|<%%|<%=|<%#|<%|\z)/m
+          etag_reg = /(.*?)(--#>|%%>|%>|\z)/m
           scanner = StringScanner.new(@src)
           while ! scanner.eos?
             scanner.scan(@stag ? etag_reg : stag_reg)
@@ -520,8 +519,8 @@ class ERB
 
       class ExplicitScanner < Scanner # :nodoc:
         def scan
-          stag_reg = /(.*?)(^[ \t]*<%-|<%%|<%=|<%#|<%-|<%|\z)/m
-          etag_reg = /(.*?)(%%>|-%>|%>|\z)/m
+          stag_reg = /(.*?)(^[ \t]*<%-|<!#--|<%%|<%=|<%#|<%-|<%|\z)/m
+          etag_reg = /(.*?)(--#>|%%>|-%>|%>|\z)/m
           scanner = StringScanner.new(@src)
           while ! scanner.eos?
             scanner.scan(@stag ? etag_reg : stag_reg)
@@ -598,11 +597,13 @@ class ERB
       enc = s.encoding
       raise ArgumentError, "#{enc} is not ASCII compatible" if enc.dummy?
       s = s.b # see String#b
+      
       enc = detect_magic_comment(s) || enc
       out = Buffer.new(self, enc)
-
       content = ''
       scanner = make_scanner(s)
+
+
       scanner.scan do |token|
         next if token.nil?
         next if token == ''
@@ -625,35 +626,49 @@ class ERB
             content = ''
           when '<%%'
             content << '<%'
+          when '<!#--'
+            scanner.stag = token
+            add_put_cmd(out, content) if content.size > 0
+            content = ''
           else
             content << token
           end
         else
-          case token
-          when '%>'
-            case scanner.stag
-            when '<%'
-              if content[-1] == ?\n
-                content.chop!
-                out.push(content)
-                out.cr
-              else
-                out.push(content)
-              end
-            when '<%='
-              add_insert_cmd(out, content)
-            when '<%#'
-              # out.push("# #{content_dump(content)}")
+          if scanner.stag == '<!#--'
+            if token == '--#>'
+              scanner.stag = nil
+              content = ''
             end
-            scanner.stag = nil
-            content = ''
-          when '%%>'
-            content << '%>'
           else
-            content << token
+            case token
+            when '--#>'
+              # ignoring all other tokens
+            when '%>'
+              case scanner.stag
+              when '<%'
+                if content[-1] == ?\n
+                  content.chop!
+                  out.push(content)
+                  out.cr
+                else
+                  out.push(content)
+                end
+              when '<%='
+                add_insert_cmd(out, content)
+              when '<%#'
+                # out.push("# #{content_dump(content)}")
+              end
+              scanner.stag = nil
+              content = ''
+            when '%%>'
+              content << '%>'
+            else
+              content << token
+            end
           end
         end
       end
+
       add_put_cmd(out, content) if content.size > 0
       out.close
       return out.script, enc
